@@ -1,0 +1,2 @@
+# micarrayd
+microphone array daemon
