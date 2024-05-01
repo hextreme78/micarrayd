@@ -1,0 +1,20 @@
+{
+	"noise_cancelling": false,
+	"echo_cancelling": true,
+	"micconf": {
+		"mics": [
+			{
+				"interface": "alsa_input.usb-C-Media_Electronics_Inc._USB_PnP_Sound_Device-00.analog-mono",
+				"channels": 1
+			}
+		],
+		"rate": 48000,
+		"format": "f32"
+	},
+	"spkrconf": {
+		"interface": "alsa_output.usb-C-Media_Electronics_Inc._USB_PnP_Sound_Device-00.analog-stereo-output",
+		"rate": 48000,
+		"format": "f32",
+		"channels": 1
+	}
+}

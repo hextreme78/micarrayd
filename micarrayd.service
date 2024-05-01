@@ -1,0 +1,11 @@
+[Unit]
+Description=microphone array daemon
+
+[Service]
+Type=forking
+PIDFile=/var/run/micarrayd.pid
+ExecStart=/usr/local/bin/micarrayd
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
