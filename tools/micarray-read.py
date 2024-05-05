@@ -3,6 +3,9 @@ import getopt
 import socket
 import wave
 
+rate = 48000
+channels = 2
+
 def recv_all(sock, buffer_size):
     data = b""
     remaining_sz = buffer_size
@@ -12,7 +15,6 @@ def recv_all(sock, buffer_size):
         remaining_sz -= len(chunk)
     return data
 
-'''
 opts, _ = getopt.getopt(sys.argv[1:], "r:c:d:o:f", ["rate=", "channels=", "duartion=", "output=", "fmt=", "help"])
 for opt, val in opts:
     if opt in ["-r", "--rate"]:
@@ -31,11 +33,6 @@ for opt, val in opts:
         print("-d/--duration duration of audio")
         print("-o/--output output file")
         exit()
-'''
-rate = 48000
-channels = 2
-duration = 10
-output = "test.wav"
 
 sample_size = 2
 nbytes = int(rate * duration * channels * sample_size)

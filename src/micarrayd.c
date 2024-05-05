@@ -20,6 +20,7 @@ struct mic {
 	pa_simple *handle;
 	pa_sample_spec sample_spec;
 	char *interface;
+	DenoiseState *rnnoise;
 	int16_t buffer[];
 };
 
@@ -143,13 +144,13 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 	spkr_sample_spec.rate = spkrrate;
 	spkr_sample_spec.channels = spkrchannels;
 
-	/*spkr_handle = pa_simple_new(NULL, "micarrayd",
+	spkr_handle = pa_simple_new(NULL, "micarrayd",
 			PA_STREAM_PLAYBACK, spkrinterface, "playback",
 			&spkr_sample_spec, NULL, NULL, &err);
 	if (!spkr_handle) {
 		syslog(LOG_ERR, "pa_simple_new() error %s", pa_strerror(err));
 		return -1;
-	}*/
+	}
 
 	nmics = cJSON_GetArraySize(micconf_mics);
 
@@ -186,6 +187,11 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 		mics[i]->sample_spec.channels = channels;
 		mics[i]->handle = NULL;
 		mics[i]->interface = interface;
+		if (!(mics[i]->rnnoise = rnnoise_create(NULL))) {
+			syslog(LOG_ERR, "can not init rnnoise");
+			return -1;
+		}
+
 		/*
 		mics[i]->handle = pa_simple_new(NULL, "micarrayd",
 				PA_STREAM_RECORD, interface, "record",
@@ -197,10 +203,12 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 		*/
 	}
 
+	/*
 	if (!(rnnoise = rnnoise_create(NULL))) {
 		syslog(LOG_ERR, "can not init rnnoise");
 		return -1;
 	}
+	*/
 
 	if ((sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0)) < 0) {
 		syslog(LOG_ERR, "can not open socket");
@@ -278,7 +286,7 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 				for (size_t j = 0; j < MIC_BUFFER_FRAMES_PER_CHANNEL; j++) {
 					mictmpbuf[j] = mics[i]->buffer[j];
 				}
-				rnnoise_process_frame(rnnoise, mictmpbuf, mictmpbuf);
+				rnnoise_process_frame(mics[i]->rnnoise, mictmpbuf, mictmpbuf);
 				for (size_t j = 0; j < MIC_BUFFER_FRAMES_PER_CHANNEL; j++) {
 					mics[i]->buffer[j] = mictmpbuf[j];
 				}
