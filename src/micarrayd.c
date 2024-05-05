@@ -19,6 +19,7 @@
 struct mic {
 	pa_simple *handle;
 	pa_sample_spec sample_spec;
+	char *interface;
 	int16_t buffer[];
 };
 
@@ -142,13 +143,13 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 	spkr_sample_spec.rate = spkrrate;
 	spkr_sample_spec.channels = spkrchannels;
 
-	spkr_handle = pa_simple_new(NULL, "micarrayd",
+	/*spkr_handle = pa_simple_new(NULL, "micarrayd",
 			PA_STREAM_PLAYBACK, spkrinterface, "playback",
 			&spkr_sample_spec, NULL, NULL, &err);
 	if (!spkr_handle) {
 		syslog(LOG_ERR, "pa_simple_new() error %s", pa_strerror(err));
 		return -1;
-	}
+	}*/
 
 	nmics = cJSON_GetArraySize(micconf_mics);
 
@@ -183,7 +184,9 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 		mics[i]->sample_spec.format = PA_SAMPLE_S16LE;
 		mics[i]->sample_spec.rate = 48000;
 		mics[i]->sample_spec.channels = channels;
-
+		mics[i]->handle = NULL;
+		mics[i]->interface = interface;
+		/*
 		mics[i]->handle = pa_simple_new(NULL, "micarrayd",
 				PA_STREAM_RECORD, interface, "record",
 				&mics[i]->sample_spec, NULL, NULL, &err);
@@ -191,9 +194,8 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 			syslog(LOG_ERR, "pa_simple_new() error %s", pa_strerror(err));
 			return -1;
 		}
+		*/
 	}
-
-	cJSON_Delete(config);
 
 	if (!(rnnoise = rnnoise_create(NULL))) {
 		syslog(LOG_ERR, "can not init rnnoise");
@@ -225,8 +227,45 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 	while (!*stop) {
 		if (conn < 0) {
 			conn = accept(sock, NULL, NULL);
+			if (conn >= 0) {
+				for (size_t i = 0; i < nmics; i++) {
+					mics[i]->handle = pa_simple_new(NULL, "micarrayd",
+							PA_STREAM_RECORD, mics[i]->interface, "record",
+							&mics[i]->sample_spec, NULL, NULL, &err);
+					if (!mics[i]->handle) {
+						syslog(LOG_ERR, "pa_simple_new() error %s", pa_strerror(err));
+						return -1;
+					}
+				}
+			}
 		}
-	
+
+		if (conn < 0) {
+			continue;
+		}
+
+		/*
+		if (conn < 0) {
+			for (size_t i = 0; i < nmics; i++) {
+				if (pa_simple_flush(mics[i]->handle, &err) < 0) {
+					syslog(LOG_ERR, "pa_simple_flush() error %s", pa_strerror(err));
+				}
+				syslog(LOG_INFO, "test");
+			}
+			continue;
+		} else {
+			for (size_t i = 0; i < nmics; i++) {
+				mics[i]->handle = pa_simple_new(NULL, "micarrayd",
+						PA_STREAM_RECORD, interface, "record",
+						&mics[i]->sample_spec, NULL, NULL, &err);
+				if (!mics[i]->handle) {
+					syslog(LOG_ERR, "pa_simple_new() error %s", pa_strerror(err));
+					return -1;
+				}
+			}
+		}
+		*/
+
 		for (size_t i = 0; i < nmics; i++) {
 			err = pa_simple_read(mics[i]->handle, mics[i]->buffer,
 					MIC_BUFFER_FRAMES_PER_CHANNEL * mics[i]->sample_spec.channels * sizeof(int16_t), &err);
@@ -255,6 +294,9 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 								sizeof(int16_t)) {
 							close(conn);
 							conn = -1;
+							for (size_t i = 0; i < nmics; i++) {
+								pa_simple_free(mics[i]->handle);
+							}
 							goto new_conn;
 						}
 					}
