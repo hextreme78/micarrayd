@@ -1,7 +1,9 @@
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdint.h>
 #include <syslog.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -15,12 +17,14 @@
 
 #define MIC_BUFFER_FRAMES_PER_CHANNEL 480
 #define SOCK_PATH "/var/run/micarrayd.socket"
+#define SOCK2_PATH "/var/run/micarrayd.socket2"
 
 struct mic {
 	pa_simple *handle;
 	pa_sample_spec sample_spec;
 	char *interface;
 	DenoiseState *rnnoise;
+	SpeexEchoState *st;
 	int16_t buffer[];
 };
 
@@ -51,6 +55,7 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 	struct sockaddr_un sockaddr;
 	
 	float mictmpbuf[MIC_BUFFER_FRAMES_PER_CHANNEL];
+	int16_t spkrtmpbuf[MIC_BUFFER_FRAMES_PER_CHANNEL];
 
 	cJSON *config;
 	cJSON *micconf, *micconf_mics, *micconf_rate, *micconf_format;
@@ -144,14 +149,6 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 	spkr_sample_spec.rate = spkrrate;
 	spkr_sample_spec.channels = spkrchannels;
 
-	spkr_handle = pa_simple_new(NULL, "micarrayd",
-			PA_STREAM_PLAYBACK, spkrinterface, "playback",
-			&spkr_sample_spec, NULL, NULL, &err);
-	if (!spkr_handle) {
-		syslog(LOG_ERR, "pa_simple_new() error %s", pa_strerror(err));
-		return -1;
-	}
-
 	nmics = cJSON_GetArraySize(micconf_mics);
 
 	if (!(mics = malloc(sizeof(*mics) * nmics))) {
@@ -191,24 +188,12 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 			syslog(LOG_ERR, "can not init rnnoise");
 			return -1;
 		}
-
-		/*
-		mics[i]->handle = pa_simple_new(NULL, "micarrayd",
-				PA_STREAM_RECORD, interface, "record",
-				&mics[i]->sample_spec, NULL, NULL, &err);
-		if (!mics[i]->handle) {
-			syslog(LOG_ERR, "pa_simple_new() error %s", pa_strerror(err));
+		mics[i]->st = speex_echo_state_init(MIC_BUFFER_FRAMES_PER_CHANNEL, MIC_BUFFER_FRAMES_PER_CHANNEL / 2);
+		if (!mics[i]->st) {
+			syslog(LOG_ERR, "can not init speex");
 			return -1;
 		}
-		*/
 	}
-
-	/*
-	if (!(rnnoise = rnnoise_create(NULL))) {
-		syslog(LOG_ERR, "can not init rnnoise");
-		return -1;
-	}
-	*/
 
 	if ((sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0)) < 0) {
 		syslog(LOG_ERR, "can not open socket");
@@ -232,6 +217,29 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 
 	conn = -1;
 
+	int sock2, conn2;
+	if ((sock2 = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0)) < 0) {
+		syslog(LOG_ERR, "can not open socket");
+		return -1;
+	}
+
+	sockaddr.sun_family = AF_UNIX;
+	strcpy(sockaddr.sun_path, SOCK2_PATH);
+
+	unlink(SOCK2_PATH);
+
+	if (bind(sock2, (struct sockaddr *) &sockaddr, sizeof(sockaddr)) < 0) {
+		syslog(LOG_ERR, "can not bind socket");
+		return -1;
+	}
+
+	if (listen(sock2, 1) < 0) {
+		syslog(LOG_ERR, "can not listen socket");
+		return -1;
+	}
+
+	conn2 = -1;
+
 	while (!*stop) {
 		if (conn < 0) {
 			conn = accept(sock, NULL, NULL);
@@ -248,69 +256,86 @@ int micarrayd(volatile int *stop, int argc, char *argv[])
 			}
 		}
 
-		if (conn < 0) {
-			continue;
-		}
-
-		/*
-		if (conn < 0) {
-			for (size_t i = 0; i < nmics; i++) {
-				if (pa_simple_flush(mics[i]->handle, &err) < 0) {
-					syslog(LOG_ERR, "pa_simple_flush() error %s", pa_strerror(err));
-				}
-				syslog(LOG_INFO, "test");
-			}
-			continue;
-		} else {
-			for (size_t i = 0; i < nmics; i++) {
-				mics[i]->handle = pa_simple_new(NULL, "micarrayd",
-						PA_STREAM_RECORD, interface, "record",
-						&mics[i]->sample_spec, NULL, NULL, &err);
-				if (!mics[i]->handle) {
+		if (conn2 < 0) {
+			conn2 = accept(sock2, NULL, NULL);
+			if (conn2 >= 0) {
+				spkr_handle = pa_simple_new(NULL, "micarrayd",
+						PA_STREAM_PLAYBACK, spkrinterface, "playback",
+						&spkr_sample_spec, NULL, NULL, &err);
+				if (!spkr_handle) {
 					syslog(LOG_ERR, "pa_simple_new() error %s", pa_strerror(err));
 					return -1;
 				}
 			}
 		}
-		*/
 
-		for (size_t i = 0; i < nmics; i++) {
-			err = pa_simple_read(mics[i]->handle, mics[i]->buffer,
-					MIC_BUFFER_FRAMES_PER_CHANNEL * mics[i]->sample_spec.channels * sizeof(int16_t), &err);
-			if (err < 0) {
-				syslog(LOG_ERR, "pa_simple_read() error");
-				return -1;
-			}
-
-			if (noise_cancelling) {
-				for (size_t j = 0; j < MIC_BUFFER_FRAMES_PER_CHANNEL; j++) {
-					mictmpbuf[j] = mics[i]->buffer[j];
-				}
-				rnnoise_process_frame(mics[i]->rnnoise, mictmpbuf, mictmpbuf);
-				for (size_t j = 0; j < MIC_BUFFER_FRAMES_PER_CHANNEL; j++) {
-					mics[i]->buffer[j] = mictmpbuf[j];
+		ssize_t nbytes;
+		bool spkrw = false;
+		if (conn2 >= 0) {
+			err = nbytes = recv(conn2, spkrtmpbuf, MIC_BUFFER_FRAMES_PER_CHANNEL * sizeof(int16_t), MSG_DONTWAIT);
+			if (err < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+				spkrw = false;
+				;
+			} else if (err <= 0) {
+				spkrw = false;
+				close(conn2);
+				conn2 = -1;
+				pa_simple_free(spkr_handle);
+				continue;
+			} else {
+				spkrw = true;
+				err = pa_simple_write(spkr_handle, spkrtmpbuf, nbytes, &err);
+				if (err < 0) {
+					syslog(LOG_ERR, "pa_simple_write() error %s", pa_strerror(err));
+					return -1;
 				}
 			}
 		}
 
-		for (size_t i = 0; i < MIC_BUFFER_FRAMES_PER_CHANNEL; i++) {
-			for (size_t j = 0; j < nmics; j++) {
-				for (size_t k = 0; k < mics[j]->sample_spec.channels; k++) {
-					int16_t frame = mics[j]->buffer[i * mics[j]->sample_spec.channels + k];
-					if (conn >= 0) {
-						if ((err = send(conn, &frame, sizeof(int16_t), 0)) !=
-								sizeof(int16_t)) {
-							close(conn);
-							conn = -1;
-							for (size_t i = 0; i < nmics; i++) {
-								pa_simple_free(mics[i]->handle);
+		if (conn >= 0) {
+			for (size_t i = 0; i < nmics; i++) {
+				err = pa_simple_read(mics[i]->handle, mics[i]->buffer,
+						MIC_BUFFER_FRAMES_PER_CHANNEL * mics[i]->sample_spec.channels * sizeof(int16_t), &err);
+				if (err < 0) {
+					syslog(LOG_ERR, "pa_simple_read() error");
+					return -1;
+				}
+
+				if (noise_cancelling) {
+					for (size_t j = 0; j < MIC_BUFFER_FRAMES_PER_CHANNEL; j++) {
+						mictmpbuf[j] = mics[i]->buffer[j];
+					}
+					rnnoise_process_frame(mics[i]->rnnoise, mictmpbuf, mictmpbuf);
+					for (size_t j = 0; j < MIC_BUFFER_FRAMES_PER_CHANNEL; j++) {
+						mics[i]->buffer[j] = mictmpbuf[j];
+					}
+				}
+
+				if (echo_cancelling && spkrw) {
+					speex_echo_cancellation(mics[i]->st, mics[i]->buffer, spkrtmpbuf, mics[i]->buffer);
+				}
+			}
+
+			for (size_t i = 0; i < MIC_BUFFER_FRAMES_PER_CHANNEL; i++) {
+				for (size_t j = 0; j < nmics; j++) {
+					for (size_t k = 0; k < mics[j]->sample_spec.channels; k++) {
+						int16_t frame = mics[j]->buffer[i * mics[j]->sample_spec.channels + k];
+						if (conn >= 0) {
+							if ((err = send(conn, &frame, sizeof(int16_t), 0)) !=
+									sizeof(int16_t)) {
+								close(conn);
+								conn = -1;
+								for (size_t i = 0; i < nmics; i++) {
+									pa_simple_free(mics[i]->handle);
+								}
+								goto new_conn;
 							}
-							goto new_conn;
 						}
 					}
 				}
 			}
 		}
+
 new_conn:
 	}
 
